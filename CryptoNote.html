@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <title>Дешифрування та AES-GCM шифрування/розшифрування з кількома маркерами</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: auto; padding: 20px; }
+    textarea, input[type="text"], input[type="checkbox"] { width: 100%; margin-bottom: 10px; }
+    button { margin: 5px 10px 5px 0; }
+    .status { margin: 10px 0; font-weight: bold; }
+    .success { color: green; }
+    .error { color: red; }
+  </style>
+</head>
+<body>
+  <h2>Завантаження файлу, шифрування/дешифрування з кількома маркерами та AES-GCM</h2>
+
+  <label>Ключ (Base64 або пароль):</label>
+  <input type="text" id="key">
+  <button onclick="generateBase64Key()">🔑 Згенерувати ключ</button>
+
+  <label><input type="checkbox" id="randomMarkers"> Використовувати випадкові маркери</label>
+
+  <input type="file" id="fileInput">
+  <button onclick="loadAndDecrypt()">Завантажити і розшифрувати</button>
+
+  <label>Повідомлення (або зашифроване Base64):</label>
+  <textarea id="message" rows="4"></textarea>
+
+  <div>
+    <button onclick="encrypt()">🔒 Зашифрувати</button>
+    <button onclick="decrypt()">🔓 Розшифрувати</button>
+    <button onclick="downloadResult()">💾 Завантажити результат</button>
+  </div>
+
+  <label>Результат:</label>
+  <textarea id="result" rows="5" readonly></textarea>
+
+
+  <div id="status" class="status"></div>
+
+  <script>
+    function showStatus(text, isError = false) {
+      const status = document.getElementById("status");
+      status.textContent = text;
+      status.className = "status " + (isError ? "error" : "success");
+    }
+
+    async function generateBase64Key() {
+      const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+      const raw = await crypto.subtle.exportKey("raw", key);
+      document.getElementById("key").value = btoa(String.fromCharCode(...new Uint8Array(raw)));
+      showStatus("Згенеровано новий ключ.");
+    }
+
+    async function getKeyFromInput() {
+      const input = document.getElementById("key").value.trim();
+      try {
+        const raw = Uint8Array.from(atob(input), c => c.charCodeAt(0));
+        return await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+      } catch {
+        return deriveKeyFromPassword(input);
+      }
+    }
+
+    async function deriveKeyFromPassword(password) {
+      const enc = new TextEncoder();
+      const keyMaterial = await crypto.subtle.importKey(
+        "raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveKey"]
+      );
+      return crypto.subtle.deriveKey(
+        {
+          name: "PBKDF2",
+          salt: new Uint8Array(16),
+          iterations: 100000,
+          hash: "SHA-256"
+        },
+        keyMaterial,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+      );
+    }
+
+	async function loadAndDecrypt() {
+	  const fileInput = document.getElementById("fileInput");
+	  if (!fileInput.files.length) {
+		alert("Оберіть файл для розшифрування.");
+		return;
+	  }
+
+	  const reader = new FileReader();
+	  reader.onload = async function (e) {
+		const text = e.target.result;
+		const regex = /\[([^\[\]]+)\]([\s\S]*?)\[\/\1\]/g;
+		let result = "";
+		let markers = [];
+		let match;
+
+		while ((match = regex.exec(text)) !== null) {
+		  const marker = match[1];
+		  markers.push(marker);
+
+		  const b64 = match[2].trim();
+		  try {
+			const data = atob(b64);
+			const combined = new Uint8Array([...data].map(c => c.charCodeAt(0)));
+			const iv = combined.slice(0, 12);
+			const encrypted = combined.slice(12);
+			const key = await getKeyFromInput();
+			const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
+			const decoder = new TextDecoder();
+			result += `🔓 [${marker}]: ${decoder.decode(decrypted)}\n\n`;
+		  } catch (err) {
+			result += `❌ [${marker}]: Помилка дешифрування.\n\n`;
+		  }
+		}
+
+		document.getElementById("result").value = result;
+	  };
+	  reader.readAsText(fileInput.files[0]);
+	}
+
+
+    function generateRandomString(length) {
+      const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      let result = "";
+      for (let i = 0; i < length; i++) {
+        const randomIndex = Math.floor(Math.random() * charset.length);
+        result += charset[randomIndex];
+      }
+      return result;
+    }
+
+    async function encrypt() {
+      try {
+        const text = document.getElementById("message").value;
+        const key = await getKeyFromInput();
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encoder = new TextEncoder();
+        const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(text));
+        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(encrypted), iv.length);
+
+        let resultWithMarkers = '';
+        if (document.getElementById("randomMarkers").checked) {
+          const marker = generateRandomString(8); // Генеруємо один маркер
+          resultWithMarkers = `[${marker}]${btoa(String.fromCharCode(...combined))}[/${marker}]`;
+        } else {
+          resultWithMarkers = btoa(String.fromCharCode(...combined));
+        }
+
+        document.getElementById("result").value = resultWithMarkers;
+        await navigator.clipboard.writeText(resultWithMarkers);
+        showStatus("✅ Успішно зашифровано і скопійовано.");
+      } catch (e) {
+        showStatus("❌ Помилка шифрування.", true);
+      }
+    }
+
+    function downloadResult() {
+      const text = document.getElementById("result").value;
+      if (!text) {
+        showStatus("⛔ Немає результату для збереження.", true);
+        return;
+      }
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "result.txt";
+      a.click();
+      showStatus("✅ Файл збережено.");
+    }
+	async function decrypt() {
+	  try {
+		const input = document.getElementById("message").value.trim();
+		const key = await getKeyFromInput();
+		const regex = /\[([^\[\]]+)\]([\s\S]*?)\[\/\1\]/g;
+		let result = "";
+		let match;
+		let found = false;
+
+		while ((match = regex.exec(input)) !== null) {
+		  found = true;
+		  try {
+			const data = atob(match[2].trim());
+			const combined = new Uint8Array([...data].map(c => c.charCodeAt(0)));
+			const iv = combined.slice(0, 12);
+			const encrypted = combined.slice(12);
+			const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
+			const decoder = new TextDecoder();
+			result += decoder.decode(decrypted) + "\n\n";
+		  } catch {
+			result += "❌ Помилка дешифрування фрагмента.\n\n";
+		  }
+		}
+
+		if (!found) {
+		  // Пробуємо як звичайний Base64 без маркерів
+		  const data = atob(input);
+		  const combined = new Uint8Array([...data].map(c => c.charCodeAt(0)));
+		  const iv = combined.slice(0, 12);
+		  const encrypted = combined.slice(12);
+		  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
+		  const decoder = new TextDecoder();
+		  result = decoder.decode(decrypted);
+		}
+
+		document.getElementById("result").value = result;
+		showStatus("✅ Успішно розшифровано.");
+	  } catch (err) {
+		showStatus("❌ Помилка при розшифруванні.", true);
+	  }
+	}
+	
+
+
+  </script>
+</body>
+</html>
